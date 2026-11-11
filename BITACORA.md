@@ -76,3 +76,37 @@ terraform.tfstate: el estado real, con los IDs de lo que se creó (como el 4387c
 Si suben main.tf y el lock file a Git, también queda quién cambió qué y cuándo, que era justo uno de los puntos de «Por qué duele». El propio plan sirve de documentación del cambio: muestra url = "http://localhost:8080" -> "http://localhost:8081" antes de aplicarlo.
 
 
+PUNTO 3 
+
+1. ¿Qué respondió Terraform en el paso 1 y en qué se diferencia del segundo docker run de la
+Fase 1?
+
+Esta vez el terraform hizo la comparación y antes de actuar valido y refresco la imagen y del contenedor, comparo la infraestructura real y como no encontro cambios no hizo nada. 
+
+2. ¿Qué datos guarda el state que no escribieron en main.tf? ¿Para qué los necesita Terraform?
+
+Guarda identificadores del contenedor creados por docker
+datos de red asigandos en tiempo de ejecucion
+valores por defecto que heredo de docker
+
+Los utiliza para calcular el plan, detectar cambios, destruir en orden.
+
+3. ¿Por qué el cambio de imagen reemplazó el contenedor en lugar de modificarlo? Relaciónenlo con «Infraestructura mutable vs. inmutable».
+
+Un contenedor de Docker se crea a partir de una imagen concreta, identificada por su hash , y Docker no permite cambiarle la imagen a un contenedor existente. Por eso, al pasar de nginx:1.27-alpine a nginx:1.28-alpine, el plan marcó image con # forces replacement y el símbolo -/+ (destroy and then create replacement). Terraform no “actualizó” nginx dentro del contenedor: destruyó web-g1 y creó uno nuevo a partir de la imagen 1.28.
+
+El enfoque inmutable, el servidor no se toca, se reemplaza completo. : si un servidor necesita cambiar, no se cura, se reemplaza por otro idéntico construido desde la definición.
+
+El enfoque mutable habría sido entrar al contenedor y actualizar nginx en sitio. Ese cambio no quedaría en main.tf, el servidor se volvería único (una “mascota”) y acumularía cambios no documentados. Son los mismos problemas que vivieron en la Fase 1 con ClickOps.
+
+4. ¿Cómo cambió serial después del apply y qué creen que representa?
+
+serial pasó de 13 a 18. Es el número de versión del state: Terraform lo incrementa cada vez que escribe cambios en terraform.tfstate.
+
+No subió solo una vez porque Terraform no guarda el state únicamente al final del apply. Lo guarda después de cada operación sobre un recurso, para no perder registro de lo que ya hizo si el proceso se interrumpe a mitad . 
+
+5. Piensen en un proyecto real con bases de datos: ¿qué riesgo habría si este archivo se subiera a Git?
+
+Si el state se sube a Git, cualquiera con acceso al repositorio, o cualquiera si el repo es público, obtiene esas credenciales. Además, quedan en el historial aunque luego se borre el archivo, así que habría que rotar las contraseñas.
+
+Hay un segundo riesgo, operativo. Si cada integrante trabaja con su propia copia del state desde Git, las copias se desactualizan. Un apply con un state viejo puede hacer creer a Terraform que un recurso no existe y recrearlo, o que sobra y destruirlo. Con una base de datos, eso puede significar perder datos.
