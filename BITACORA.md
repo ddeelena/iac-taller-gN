@@ -243,3 +243,50 @@ Al ejecutar `terraform init`, Terraform descarga el módulo. Para eso, el otro g
 - **Documentación de la interfaz:** qué variables recibe (`nombre`, `mensaje`, `imagen`, `puerto` y su rango válido) y qué outputs entrega (`url`, `nombre`), idealmente en un `README.md` del módulo.
 
 En equipos más grandes, el módulo se publica en un **registro** (el Terraform Registry público o uno privado de la organización) y se consume con `source` y `version`, como cualquier provider.
+
+
+`FASE 7`
+
+### Respuestas
+
+**1. ¿Qué respondió la terminal 2 en la prueba de bloqueo? ¿Qué problema de trabajo en equipo evita?**
+
+```text
+<pegar aquí la salida de terraform plan en la terminal 2>
+```
+
+La terminal 2 respondió `Error acquiring the state lock`, con la información del bloqueo: quién lo tiene, desde cuándo y qué operación lo tomó (`OperationTypeApply`). Mientras la terminal 1 tenía un `apply` abierto esperando confirmación, el backend PostgreSQL mantenía el state bloqueado, y ninguna otra operación podía leerlo ni escribirlo. Al responder `no` en la terminal 1, el bloqueo se liberó y la terminal 2 pudo planear normalmente.
+
+Evita que dos personas apliquen cambios sobre el mismo state al mismo tiempo. Sin bloqueo, ambas partirían de la misma versión del state y la última en escribir sobrescribiría el trabajo de la otra. El resultado sería un state que ya no refleja la infraestructura real: recursos huérfanos que Terraform no sabe que existen, o recursos que cree tener y ya no están. Con el bloqueo, los cambios sobre un mismo ambiente se aplican de uno en uno.
+
+**2. ¿Dónde quedó la contraseña del backend y por qué no debe estar en `main.tf`?**
+
+La contraseña quedó solo en dos lugares fuera del repositorio:
+
+- en la variable de entorno `PG_CONN_STR` de la terminal donde se definió, que desaparece al cerrarla;
+- en la configuración del contenedor `tf-state-g1`.
+
+En `main.tf` el backend está declarado vacío (`backend "pg" {}`), y Terraform completa la conexión leyendo `PG_CONN_STR` en el momento de ejecutarse. `git grep <clave>` no encuentra nada en el repositorio, y en esta bitácora la clave aparece reemplazada por `<clave>`.
+
+No debe estar en `main.tf` porque ese archivo se versiona. Todo lo que entra a un commit queda en el historial de Git para siempre, aunque después se borre, y lo puede leer cualquiera con acceso al repositorio (todos, si es público). Además, quien tiene la contraseña del backend tiene acceso al state de todos los ambientes, que contiene detalles de la infraestructura y, en proyectos reales, otros secretos. Separar la credencial del código también permite cambiarla, o usar una distinta por persona o por ambiente, sin tocar ni volver a revisar el código.
+
+**3. ¿Qué filas tiene ahora la tabla `states` y cómo se relacionan con los workspaces?**
+
+
+La tabla tiene cuatro filas: `default`, `dev`, `staging` y `prod`. Cada workspace de Terraform corresponde a una fila, y cada fila guarda un state completo e independiente. Al cambiar de workspace con `terraform workspace select`, Terraform lee y escribe la fila correspondiente. Por eso los tres ambientes comparten el mismo código y el mismo backend, pero cada uno lleva su propio registro de lo que creó: un `apply` en `dev` no ve ni puede modificar los recursos de `prod`.
+
+La fila `default` sigue existiendo porque es el workspace inicial al que se migró el state en el paso 4. Después de `terraform destroy` quedó vacía de recursos, pero no se elimina.
+
+**4. ¿Qué error da `terraform plan` en el workspace `default` y por qué es útil que falle?**
+
+
+El error es `Invalid index` en `local.ambientes[local.entorno]`, porque el mapa `ambientes` solo tiene las llaves `dev`, `staging` y `prod`. En el workspace `default`, `terraform.workspace` vale `"default"`, que no corresponde a ningún ambiente, así que Terraform no puede calcular `local.amb` y el plan se detiene antes de contactar a Docker.
+
+Es útil porque obliga a elegir un ambiente de forma explícita. Si el código tuviera un valor por defecto, alguien podría ejecutar `apply` sin darse cuenta de en qué workspace está y crear o modificar infraestructura en un lugar no previsto. Es un fallo seguro (*fail fast*): el error ocurre antes de causar daño, y su mensaje indica exactamente qué falta.
+
+**5. ¿Por qué `dev` tiene un solo sitio y `staging` replica a `prod`? ¿Por qué `prod` usa otra versión de imagen?**
+
+Cada ambiente tiene un propósito distinto:
+
+- **`dev`** es el lugar para desarrollar y probar rápido. Solo necesita lo indispensable (la tienda) para comprobar que los cambios funcionan, consumiendo menos recursos, que en la nube también significa menos costo.
+- **`staging`** es la prueba final antes de producción, y por eso debe ser lo más parecido posible a
