@@ -186,3 +186,60 @@ Cuando se  ejecute `terraform destroy`, solo se eliminarán los recursos gestion
 - **Consistencia y menos errores:** no hay riesgo de que en un lugar diga `web-g1` y en otro `web-gl` o `web-g01` por un error de tipeo.
 - **Reutilización:** como se calcula a partir de `var.grupo`, el mismo código sirve para cualquier grupo cambiando solo `terraform.tfvars`. Con `"web-gN"` escrito a mano, cada grupo tendría que editar el código en varios lugares.
 - **Legibilidad:** `local.nombre` comunica la intención ("el nombre del servidor") en lugar de un valor literal cuyo origen hay que adivinar.
+
+`PUNTO 6`
+
+El revisor debe explicar qué se destruye, qué se crea y por qué antes de aprobar.
+
+Se destruyen 2 recursos: docker_image.nginx y docker_container.web, porque los quitamos de la raíz. Se crean 6: una imagen y un contenedor por cada módulo (tienda, blog y docs). Terraform no sabe que web-g1 “se convirtió” en la tienda; para él son direcciones distintas, así que borra lo viejo y crea lo nuevo. Aprobado: 6 a crear, 0 a cambiar, 2 a destruir
+
+1. Anoten la línea Plan: del paso 8. ¿Qué se destruyó, qué se creó y por qué?
+
+- **Se destruyeron 2 recursos:** `docker_image.nginx` y `docker_container.web` (el contenedor `web-g1`). Los eliminamos de `infra/main.tf`, pero seguían registrados en el state. Cuando un recurso está en el state y ya no está en el código, Terraform entiende que debe dejar de existir.
+- **Se crearon 6 recursos:** cada llamada al módulo crea una imagen y un contenedor, así que fueron `module.tienda`, `module.blog` y `module.docs`, cada uno con su `docker_image.this` y su `docker_container.this`. Los contenedores quedaron como `tienda-g1` (8081), `blog-g1` (8082) y `docs-g1` (8083).
+
+**Por qué:** Terraform identifica cada recurso por su **dirección** en el código, no por lo que hace. Para él, `docker_container.web` y `module.tienda.docker_container.this` son recursos diferentes, aunque la tienda use el mismo puerto 8081 que tenía `web-g1`. Por eso no "movió" el servidor, sino que destruyó el viejo y creó el nuevo. Se podría haber evitado con un bloque `moved` (como propone el reto opcional), que le indica a Terraform que una dirección nueva corresponde a un recurso existente.
+
+Como la imagen se declaró con `keep_locally = true`, destruir `docker_image.nginx` no borró `nginx:1.28-alpine` del equipo. Los tres módulos la reutilizaron sin volver a descargarla.
+
+2. ¿Qué error obtendrían si el módulo no tuviera versions.tf?
+
+`terraform init` fallaría con un error como este:
+
+```text
+Error: Failed to query available provider packages
+
+Could not retrieve the list of available versions for provider hashicorp/docker:
+provider registry registry.terraform.io does not have a provider named
+registry.terraform.io/hashicorp/docker
+```
+
+Cuando un módulo usa recursos `docker_*` sin declarar de dónde viene el provider, Terraform asume el espacio de nombres por defecto, `hashicorp/`, y busca `hashicorp/docker`, que no existe. El provider real es `kreuzwerker/docker`. Declararlo en la raíz no basta: cada módulo debe indicar sus propios `required_providers`, porque Terraform resuelve los providers módulo por módulo.
+
+3. Si mañana hay que agregar una etiqueta a todos los sitios, ¿cuántos archivos tocan con módulo?
+¿Cuántos bloques habrían tocado copiando y pegando?
+
+- **Con módulo:** un archivo (`modules/sitio_web/main.tf`) y un bloque (`docker_container.this`). El cambio llega automáticamente a los tres sitios en el siguiente `apply`. Si la etiqueta debe variar por sitio, se agrega además una variable en `modules/sitio_web/variables.tf`, que sigue siendo un solo lugar.
+- **Copiando y pegando:** tres bloques `docker_container` (tienda, blog y docs), con el riesgo de olvidar uno o escribirlo distinto en cada copia. Además, el costo crece con cada sitio nuevo; con los siete sitios de la Fase 7 serían siete bloques, mientras que con el módulo sigue siendo uno.
+
+
+4. ¿Qué necesitaría otro grupo para usar su módulo sin copiar la carpeta?
+
+Que el módulo esté publicado en un lugar desde donde Terraform pueda descargarlo, y referenciarlo en su `source`. La opción más directa es nuestro repositorio de Git, apuntando a la subcarpeta y a una versión fija (etiqueta o commit):
+
+```hcl
+module "tienda" {
+  source  = "git::https://github.com/<usuario>/iac-taller-g1.git//infra/modules/sitio_web?ref=v1.0.0"
+  nombre  = "tienda-g2"
+  puerto  = 8081
+  mensaje = "Tienda del grupo 2"
+}
+```
+
+Al ejecutar `terraform init`, Terraform descarga el módulo. Para eso, el otro grupo necesitaría:
+
+- **Acceso al repositorio** (público, o con permisos si es privado).
+- **Una versión etiquetada** (`ref=v1.0.0`), para que nuestros cambios futuros no les rompan su infraestructura sin aviso.
+- **Documentación de la interfaz:** qué variables recibe (`nombre`, `mensaje`, `imagen`, `puerto` y su rango válido) y qué outputs entrega (`url`, `nombre`), idealmente en un `README.md` del módulo.
+
+En equipos más grandes, el módulo se publica en un **registro** (el Terraform Registry público o uno privado de la organización) y se consume con `source` y `version`, como cualquier provider.
