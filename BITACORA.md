@@ -110,3 +110,38 @@ No subió solo una vez porque Terraform no guarda el state únicamente al final 
 Si el state se sube a Git, cualquiera con acceso al repositorio, o cualquiera si el repo es público, obtiene esas credenciales. Además, quedan en el historial aunque luego se borre el archivo, así que habría que rotar las contraseñas.
 
 Hay un segundo riesgo, operativo. Si cada integrante trabaja con su propia copia del state desde Git, las copias se desactualizan. Un apply con un state viejo puede hacer creer a Terraform que un recurso no existe y recrearlo, o que sobra y destruirlo. Con una base de datos, eso puede significar perder datos.
+
+PUNTO 4
+
+SALIDA del plan 
+
+
+
+
+| Experimento | ¿El plan lo detectó? | ¿Qué propuso Terraform? | ¿Cómo quedó corregido? |
+|---|---|---|---|
+| A · Apagar | Sí. `must_run` pasó de `false` a `true` y el contenedor detenido ya no reportaba sus puertos publicados. | Reemplazar el contenedor (`-/+`): 1 a crear, 0 a cambiar, 1 a destruir. El bloque `ports` fuerza el reemplazo. | `terraform apply` destruyó el contenedor detenido y creó uno nuevo. La página volvió a responder en 8081. |
+| B · Borrar | Sí. `plan -refresh-only` informó que `docker_container.web` fue eliminado por fuera de Terraform. | `plan -refresh-only` solo propuso actualizar el state. `terraform plan` propuso crear el contenedor de nuevo: 1 a crear, 0 a cambiar, 0 a destruir. | `terraform apply` recreó `web-g1` desde el código. La página volvió a responder en 8081. |
+| C · Cambiar por dentro | No. El plan respondió «No changes», aunque la página mostraba «Cambio manual». | Nada. Para Terraform el contenedor coincidía con el código. | Reemplazo forzado con `terraform apply -replace=docker_container.web`: 1 a crear, 1 a destruir. El contenedor nuevo volvió a mostrar la bienvenida de nginx. |
+
+
+**1. ¿Por qué Terraform no detectó el experimento C? ¿Qué tipo de herramienta de la diapositiva «Aprovisionar ≠ configurar» se encarga de ese nivel?**
+
+Terraform solo compara los atributos del recurso que el provider le reporta: nombre, imagen, puertos, si está corriendo, etc. El archivo `index.html` vive dentro del sistema de archivos del contenedor, y ningún atributo de `docker_container` lo describe. Desde afuera, el contenedor seguía siendo idéntico al del código: mismo nombre, misma imagen, mismo puerto y corriendo. Por eso el plan respondió «No changes».
+
+Terraform es una herramienta de **aprovisionamiento**: crea y gestiona la infraestructura (que exista un contenedor con cierta imagen y puerto). Lo que pasa dentro del servidor (archivos, paquetes, servicios) lo manejan las herramientas de **gestión de configuración**, como Ansible, Chef o Puppet. Estas sí revisan y corrigen el estado interno de cada máquina.
+
+**2. ¿Por qué `-replace` es una corrección coherente con la infraestructura inmutable?**
+
+Porque no repara el contenedor alterado, lo descarta. Otra opción habría sido entrar con `docker exec` y restaurar el `index.html` a mano. Eso sería el enfoque mutable: modificar el servidor en sitio, sin registro, y dejarlo convertido en una «mascota» con cambios que nadie documentó.
+
+Con `-replace`, Terraform destruye el contenedor y crea uno nuevo exactamente desde el código. Así se garantiza que el servidor vuelva a ser idéntico a lo definido en `main.tf`, sin importar qué se le haya hecho por dentro. Es el principio de la diapositiva: el servidor no se toca, se reemplaza completo.
+
+**3. En un equipo real, ¿cómo detectarían el drift sin esperar a que alguien ejecute `plan` por casualidad?**
+
+- **Plan programado en el pipeline CI/CD:** un trabajo periódico (por ejemplo, cada noche) ejecuta `terraform plan -detailed-exitcode`. Ese comando devuelve el código `2` cuando hay diferencias, y ese código se puede usar para enviar una alerta al equipo (correo, Slack, un issue).
+- **Herramientas con detección de drift integrada:** plataformas como HCP Terraform (antes Terraform Cloud) revisan los workspaces automáticamente y avisan cuando la infraestructura real se desvía del state.
+- **Prevenir además de detectar:** quitar los permisos para modificar la infraestructura a mano, de modo que los cambios solo puedan entrar por código revisado, y activar registros de auditoría del proveedor para saber quién cambió qué.
+
+Para el nivel que Terraform no ve, como el experimento C, se combina con herramientas de gestión de configuración que verifican periódicamente el contenido de los servidores, o se adopta del todo el modelo inmutable: los contenedores se reemplazan con frecuencia y nadie tiene acceso para modificarlos por dentro.
+
