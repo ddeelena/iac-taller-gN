@@ -280,6 +280,7 @@ La fila `default` sigue existiendo porque es el workspace inicial al que se migr
 **4. ¿Qué error da `terraform plan` en el workspace `default` y por qué es útil que falle?**
 
 
+
 El error es `Invalid index` en `local.ambientes[local.entorno]`, porque el mapa `ambientes` solo tiene las llaves `dev`, `staging` y `prod`. En el workspace `default`, `terraform.workspace` vale `"default"`, que no corresponde a ningún ambiente, así que Terraform no puede calcular `local.amb` y el plan se detiene antes de contactar a Docker.
 
 Es útil porque obliga a elegir un ambiente de forma explícita. Si el código tuviera un valor por defecto, alguien podría ejecutar `apply` sin darse cuenta de en qué workspace está y crear o modificar infraestructura en un lugar no previsto. Es un fallo seguro (*fail fast*): el error ocurre antes de causar daño, y su mensaje indica exactamente qué falta.
@@ -289,4 +290,78 @@ Es útil porque obliga a elegir un ambiente de forma explícita. Si el código t
 Cada ambiente tiene un propósito distinto:
 
 - **`dev`** es el lugar para desarrollar y probar rápido. Solo necesita lo indispensable (la tienda) para comprobar que los cambios funcionan, consumiendo menos recursos, que en la nube también significa menos costo.
-- **`staging`** es la prueba final antes de producción, y por eso debe ser lo más parecido posible a
+- **`staging`** es la prueba final antes de producción, y por eso debe ser lo más parecido posible a `prod`: los mismos tres sitios. Si un cambio funciona en un `staging` idéntico a `prod`, hay alta confianza de que funcionará en producción. Si `staging` fuera más pequeño, se podrían escapar problemas que solo aparecen con todos los componentes juntos.
+- **`prod`** usa `nginx:1.27-alpine` mientras `dev` y `staging` prueban `nginx:1.28-alpine`. Es una **promoción controlada**: la versión nueva primero se valida en los ambientes de prueba, y solo cuando `staging` demuestra que funciona se cambia el valor de `prod`. Así un error de la versión nueva afecta a los ambientes de prueba y no a los usuarios reales.
+
+**6. Los tres ambientes comparten código y backend. ¿Qué riesgo tiene eso frente a usar carpetas separadas por ambiente?**
+
+- **Equivocarse de workspace:** el ambiente activo no se ve en los archivos, solo en el comando `terraform workspace show`. Es fácil ejecutar `apply` en `prod` creyendo estar en `dev`. Con carpetas separadas, el ambiente es evidente por la ruta donde se trabaja.
+- **Un cambio afecta a todos los ambientes:** como el código es uno solo, cualquier modificación se aplicará a `prod` en su siguiente `apply`, aunque solo se haya querido probar en `dev`. Las diferencias entre ambientes deben expresarse con condiciones o mapas (como `local.ambientes`), lo que hace el código más complejo.
+- **Mismo acceso para todo:** con un solo backend y una sola credencial, quien puede modificar `dev` también puede leer y modificar el state de `prod`. Con carpetas o backends separados, se puede restringir el acceso a producción a menos personas.
+- **Radio de impacto mayor:** un error en el backend compartido, ya sea el contenedor caído, una base de datos dañada o un bloqueo atascado, afecta a los tres ambientes a la vez.
+
+Las carpetas separadas tienen su propio costo: más duplicación y riesgo de que los ambientes se desalineen con el tiempo. En la práctica, los riesgos de los workspaces se reducen con un pipeline CI/CD que fija el ambiente en cada ejecución, con revisión obligatoria del plan antes de aplicar en `prod` y, en equipos grandes, con un backend o credenciales separadas para producción.
+
+`PUNTO 8 `
+
+En el primer chequeo de seguridad fallaron 
+
+CKV2_AWS_6 CKV_AWS_145 CKV_AWS_21  CKV_AWS_144 CKV_AWS_18  CKV2_AWS_61 CKV2_AWS_62 CKV_AWS_56 CKV_AWS_55 CKV_AWS_54 CKV_AWS_53
+
+en el segundo fallaron 
+
+CKV2_AWS_62 CKV_AWS_18 CKV2_AWS_61 CKV_AWS_144 CKV_AWS_145 CKV_AWS_21
+
+
+### Respuestas
+
+**1. ¿Qué encontró cada nivel (estático, pruebas, seguridad) que los otros no podían encontrar?**
+
+- **Análisis estático (`fmt -check` y `validate`):** encontró problemas en el *texto* del código sin ejecutar nada. La primera ejecución de `validar.sh` se detuvo en `fmt -check` y señaló seis archivos con formato incorrecto (`locals.tf`, `main.tf`, `terraform.tfvars` y tres del módulo), y en la Prueba A detectó la indentación desordenada de `outputs.tf`. `validate` revisa sintaxis, tipos y referencias, por ejemplo una variable mal escrita. Ninguno de los otros niveles mira el formato. Este es además el nivel más rápido y barato: no necesita a Docker ni al provider.
+- **Pruebas (`terraform test`):** encontraron problemas de *comportamiento*, que solo aparecen cuando el código se evalúa con valores concretos. Verificaron que la URL corresponde al puerto, que la validación rechaza el 9500, que el output `nombre` coincide con la variable y, con `despliegue_real`, que el contenedor se crea de verdad en Docker con el nombre esperado. Un código puede estar bien formateado y ser válido, y aun así producir una URL equivocada o fallar al crearse; eso solo lo descubren las pruebas.
+- **Seguridad (`checkov`):** encontró configuraciones *inseguras* que son perfectamente válidas y funcionales. El bucket con los cuatro valores en `false` pasa `fmt`, pasa `validate` y se crearía sin errores, pero queda expuesto públicamente. En la Prueba B, `validar.sh` superó los tres primeros niveles y solo checkov lo detuvo. Los otros niveles comprueban que el código funcione; este comprueba que cumpla las políticas de seguridad.
+
+**2. ¿Qué vio quien observaba `docker ps` durante `despliegue_real`? ¿Por qué vale la pena un entorno desechable?**
+
+Durante las pruebas `plan` no cambió nada en `docker ps`. Al llegar a `despliegue_real` apareció un contenedor nuevo, `prueba-g1`, con `nginx:1.28-alpine` en el puerto 8999, junto a los siete sitios de los ambientes y el backend. Al terminar las pruebas, en la fase de *tearing down*, Terraform lo destruyó automáticamente y `docker ps` volvió a mostrar solo los siete sitios y `tf-state-g1`.
+
+Vale la pena porque permite probar el comportamiento real, creando infraestructura de verdad, sin poner en riesgo los ambientes existentes:
+
+- **Aislamiento:** `terraform test` usa un state temporal propio, distinto del backend PostgreSQL, así que la prueba no puede modificar ni destruir `dev`, `staging` o `prod`.
+- **Limpieza automática:** lo creado se destruye al terminar, sin dejar contenedores huérfanos ni, en la nube, recursos generando costos.
+- **Repetible:** cada ejecución parte de cero, así que el resultado no depende de restos de pruebas anteriores. Por eso las pruebas pueden correr en cada cambio dentro de un pipeline.
+
+**3. ¿Qué controles fallaron en el bucket y cuántos quedaron después de corregir? ¿Cuáles de ellos corresponden al ejemplo «sin buckets públicos» de la clase?**
+
+| Escaneo | Passed | Failed |
+|---|---|---|
+| Antes (cuatro valores en `false`) | `<n>` | `<n>` |
+| Después (cuatro valores en `true`) | `<n>` | `<n>` |
+
+Controles que fallaron en el primer escaneo: `<lista de IDs, por ejemplo CKV_AWS_53, CKV_AWS_54, CKV_AWS_55, CKV_AWS_56, CKV_AWS_18, CKV_AWS_21, CKV_AWS_145...>`
+
+Al corregir los cuatro valores dejaron de fallar los cuatro controles de acceso público, que son los que corresponden al ejemplo «sin buckets públicos»:
+
+- **CKV_AWS_53:** bloquear ACLs públicas (`block_public_acls`).
+- **CKV_AWS_54:** bloquear políticas públicas (`block_public_policy`).
+- **CKV_AWS_55:** ignorar ACLs públicas existentes (`ignore_public_acls`).
+- **CKV_AWS_56:** restringir buckets públicos (`restrict_public_buckets`).
+
+Los fallos restantes no tienen que ver con el acceso público, sino con otras buenas prácticas: versionado, registro de accesos, cifrado con KMS, entre otros. Por eso `validar.sh` aplica solo los controles 53 a 56 con `--check`: es la política que el equipo decidió hacer obligatoria. Exigir todos los controles haría fallar el pipeline siempre, aunque el bucket ya no sea público. En una nube real, esos controles restantes también habría que atenderlos.
+
+**4. ¿Qué ventaja tiene detectar un problema en el código, antes del `apply`, frente a detectarlo en la nube?**
+
+- **No hay exposición:** si el bucket público se detecta en el código, nunca llega a existir. Si se detecta en la nube, ya estuvo expuesto algún tiempo, y unos minutos bastan para que bots automatizados lo encuentren y extraigan datos. Un dato filtrado no se puede "desfiltrar".
+- **Es más barato y rápido de corregir:** en el código basta con cambiar una línea y volver a ejecutar `validar.sh` en segundos. En la nube hay que investigar el incidente, corregir, aplicar de nuevo y quizás notificar a los afectados.
+- **No afecta a los usuarios ni genera costos:** un error en el código no provoca caídas del servicio ni recursos mal configurados que se cobran mientras existen.
+- **Retroalimentación inmediata:** quien escribió el cambio recibe el error mientras todavía tiene el contexto, no días después cuando una auditoría lo descubre.
+
+Es la idea de *shift left*: mover la detección de problemas lo más temprano posible en el ciclo, donde su costo es menor.
+
+**5. ¿En qué paso del pipeline de la diapositiva va `validar.sh` y qué paso humano viene después?**
+
+El pipeline de la diapositiva tiene cuatro pasos: **Commit → Validar → Revisar → Aplicar**. `validar.sh` corresponde al paso **«Validar»**: se ejecuta automáticamente después de que el cambio entra al repositorio con un commit y antes de que cualquier persona lo revise. Encadena el análisis estático (`fmt -check` y `validate`), las pruebas (`terraform test`) y el escaneo de seguridad (`checkov`), y se detiene en el primer fallo, igual que un pipeline de CI que bloquea el cambio. Su mensaje final lo dice: *"el cambio puede pasar a revisión"*.
+
+El paso humano que viene después es **«Revisar»**. Una persona lee el `terraform plan` (qué se crea, qué cambia y qué se destruye) y decide si aprueba el cambio, normalmente en un *pull request*. Solo con esa aprobación se pasa a **«Aplicar»**, donde se ejecuta el `apply`. Es el mismo rol que cumplió el revisor del plan en este taller.
+
+La división tiene sentido. La validación automática filtra los errores que una máquina puede detectar: formato, comportamiento y políticas de seguridad. Así el revisor no pierde tiempo en ellos y se concentra en lo que requiere criterio humano: si el cambio tiene sentido y si su impacto, por ejemplo un `-/+` en producción, es aceptable.

@@ -5,13 +5,13 @@ locals {
     staging = { base_puerto = 8200, sitios = ["tienda", "blog", "docs"], imagen = "nginx:1.28-alpine" }
     prod    = { base_puerto = 8300, sitios = ["tienda", "blog", "docs"], imagen = "nginx:1.27-alpine" }
   }
- # Falla a propósito en el workspace "default": obliga a elegir un ambiente
-  amb = local.ambientes[local.entorno]
+  # Falla a propósito en el workspace "default": obliga a elegir un ambiente
+  amb            = local.ambientes[local.entorno]
   desplazamiento = { tienda = 1, blog = 2, docs = 3 }
   sitios = {
-  for s in local.amb.sitios : s => local.amb.base_puerto + local.desplazamiento[s]
+    for s in local.amb.sitios : s => local.amb.base_puerto + local.desplazamiento[s]
   }
- # TODO 1: agreguen a cada ambiente un atributo "imagen":
- # dev y staging prueban "nginx:1.28-alpine"; prod se queda en
- # "nginx:1.27-alpine" hasta que staging la valide.
+  # TODO 1: agreguen a cada ambiente un atributo "imagen":
+  # dev y staging prueban "nginx:1.28-alpine"; prod se queda en
+  # "nginx:1.27-alpine" hasta que staging la valide.
 }

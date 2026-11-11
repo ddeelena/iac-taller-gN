@@ -1,1 +1,1 @@
-grupo   = 1
+grupo = 1
