@@ -13,14 +13,24 @@ resource "docker_image" "nginx" {
   keep_locally = true
 }
 resource "docker_container" "web" {
-  name  = "web-g1"
+  name  = local.nombre
   image = docker_image.nginx.image_id
-
   ports {
     internal = 80
-    external = 8081
+    external = var.puerto
   }
-}
-output "url" {
-  value = "http://localhost:8081"
+  upload {
+    content = local.html
+    file    = "/usr/share/nginx/html/index.html"
+  }
+  # TODO 3 (reto): agreguen las etiquetas con un bloque dynamic "labels"
+  # que recorra local.etiquetas; cada etiqueta lleva label y value.
+
+  dynamic "labels" {
+    for_each = local.etiquetas
+    content {
+      label = labels.key
+      value = labels.value
+    }
+  }
 }

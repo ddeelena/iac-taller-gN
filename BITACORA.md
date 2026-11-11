@@ -145,3 +145,44 @@ Con `-replace`, Terraform destruye el contenedor y crea uno nuevo exactamente de
 
 Para el nivel que Terraform no ve, como el experimento C, se combina con herramientas de gestión de configuración que verifican periódicamente el contenido de los servidores, o se adopta del todo el modelo inmutable: los contenedores se reemplazan con frecuencia y nadie tiene acceso para modificarlos por dentro.
 
+FASE 5 
+
+Por que se reemplza el contenedor, esto es por que el contenedor tiene dos bloques nuevos y ninguno de ellos se puede agregar si el contenedor ya existe.
+
+En este caso son el upload y los labels, que requieren estar desde la creacion del contenedor. 
+
+1. puerto tiene un default, puede venir de terraform.tfvars y se pasó con -var. ¿Qué valor gana cuando hay varios?
+
+Gana la fuente más específica, que es la que se da más tarde en la ejecución. Terraform aplica este orden, de menor a mayor prioridad:
+
+1. El `default` de la variable (`8080`).
+2. Variables de entorno `TF_VAR_puerto`.
+3. El archivo `terraform.tfvars` (`8081` en nuestro caso).
+4. Archivos `*.auto.tfvars`.
+5. Las opciones `-var` y `-var-file` de la línea de comandos (`8085`).
+
+Por eso `terraform plan -var="puerto=8085"` propuso reemplazar el contenedor para publicarlo en el 8085, aunque el `tfvars` dijera 8081. Sin `-var`, gana el `tfvars`. Si el `tfvars` no definiera `puerto`, se usaría el default 8080. El default es un valor de respaldo, `tfvars` es la configuración del grupo y `-var` es un cambio puntual para una sola ejecución.
+
+2. ¿Qué hizo el bloque validation con el puerto 9500? ¿En qué se parece a la idea de Policy as Code?
+
+Detuvo el plan antes de contactar a Docker. Terraform evaluó la condición `var.puerto >= 8000 && var.puerto <= 8999`, vio que 9500 no la cumplía y respondió con nuestro mensaje: *"El puerto debe estar entre 8000 y 8999."* No se calculó ningún plan ni se tocó la infraestructura.
+
+Se parece a Policy as Code porque la regla del equipo ("los sitios usan puertos del rango 8000–8999") no depende de que alguien la recuerde ni de una revisión manual. Está escrita como código, se versiona en Git junto con la infraestructura y se verifica de forma automática en cada ejecución, bloqueando cualquier cambio que la incumpla antes de aplicarlo.
+
+La diferencia es el alcance. `validation` revisa una sola variable dentro de nuestro propio código. Las herramientas de Policy as Code, como OPA o Sentinel, aplican políticas de toda la organización sobre el plan completo y sobre cualquier repositorio; por ejemplo, "ningún bucket público" o "solo estas regiones".
+
+
+3. ¿Terraform creó la red bridge? ¿Qué le pasará cuando el grupo ejecute destroy?
+
+No. `bridge` es la red por defecto que Docker crea al instalarse, y nosotros la declaramos como **data source** (`data "docker_network" "bridge"`), no como `resource`. Un data source solo **lee** información de algo que ya existe, en este caso su `driver` para el output `red_driver`. Terraform no lo crea, no lo modifica y no lo considera de su propiedad.
+
+
+Cuando se  ejecute `terraform destroy`, solo se eliminarán los recursos gestionados (el contenedor y la imagen). La red `bridge` seguirá existiendo, porque Terraform nunca la administró. Es el mismo criterio que con la red del salón: se puede consultar y usar, pero no le pertenece a nuestro código.
+
+
+4. ¿Qué ganan con local.nombre frente a escribir "web-gN" en cada lugar donde se necesita?
+
+- **Una sola fuente de verdad:** el nombre se define una vez (`"web-g${var.grupo}"`) y todos los lugares que lo usan lo leen de ahí. Si la convención cambia, se modifica una línea y no se busca cada aparición.
+- **Consistencia y menos errores:** no hay riesgo de que en un lugar diga `web-g1` y en otro `web-gl` o `web-g01` por un error de tipeo.
+- **Reutilización:** como se calcula a partir de `var.grupo`, el mismo código sirve para cualquier grupo cambiando solo `terraform.tfvars`. Con `"web-gN"` escrito a mano, cada grupo tendría que editar el código en varios lugares.
+- **Legibilidad:** `local.nombre` comunica la intención ("el nombre del servidor") en lugar de un valor literal cuyo origen hay que adivinar.
