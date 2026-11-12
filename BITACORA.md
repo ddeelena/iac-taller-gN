@@ -19,17 +19,23 @@ XIOMARA OCAMPO
 DERLY QUEJADA
 LUISA LONDONO
 
+`FASE 1`
+
 1. ¿Qué error produjo el segundo docker run? ¿Qué dice eso sobre la idempotencia de un
 comando imperativo?
 
 Dio error de Bind for 0.0.0.0:8090 failed: port is already allocated
 
-Que si fuera imperativo entonces hubiese comparado si ya existia el contenedor antes de crearlo y no lo hubiese creado y luego teniendo problemas para correrlo. 
+Que si fuera declarativo entonces hubiese comparado si ya existia el contenedor antes de crearlo y no lo hubiese creado y luego teniendo problemas para correrlo. 
+
+Esto muestra que un comando imperativo no es idempotente: ejecutarlo dos veces no deja el mismo resultado, sino que choca con lo que creó la primera vez.
 
 2. Si otro grupo necesitara mañana un servidor idéntico, ¿qué tendrían que contarle y dónde
 quedó registrado lo que hicieron?
 
 Basado en los errores que nosotros cometimos habria que indicarles la imagen exacta que utilizamos de nginx, que el nombre no lleva espacio antes de -g1, el mapeo de los puertos 8090:80, que recuerden revisa que el puerto este libre y que deben revisar si tienen contenedores con el mismo nombre. 
+
+No quedó registrado en ningún lado, más allá del historial de PowerShell del equipo de quien lo ejecutó
 
 3. ¿Cuáles de los cuatro puntos de la diapositiva «Por qué duele» vivieron en esta fase?
 
@@ -39,7 +45,7 @@ Sin historial, nadie sabe quien cambio que: No hay forma de saber quien los creo
 
 El conocimiento se va con la persona: las correcciones que yo tuve que hacer y que me enseñaron nuevas cosas, se quedan en mi mente y al cambiar de roles ellos no lo sabrán a menos que yo este con ellos e identifique y divulgue esos conocimientos. 
 
-PUNTO 1
+`FASE 2`
 
 1. Pidieron un solo servidor. ¿Cuántos recursos creó el plan y por qué?
 
@@ -50,12 +56,14 @@ docker_container.web es el contenedor que corre a partir de esa imagen.
 
 En Terraform la imagen es un recurso independiente porque tiene su propio ciclo de vida: se descarga, tiene un ID  y se puede actualizar o borrar por separado. El “servidor” que se pidio es la suma de los dos.
 
-En nuestro caso, tuvimos que rehacer el plan puesto que teniamos el plan 8080 ocupado con algo de postgrest por lo tanto cambiamos el archivo y rejecutamos todo, entonces al aplicarlo primero destruyo el primero que fallo y luego si lo hizo con el nuevo puerto que era el 8081
+En nuestro caso, tuvimos que rehacer el plan puesto que teniamos el puerto 8080 ocupado por el Apache de PEM (Postgres Enterprise Manager) por lo tanto cambiamos el archivo y rejecutamos todo, entonces al aplicarlo primero destruyo el primero que fallo y luego si lo hizo con el nuevo puerto que era el 8081
 
 2. ¿Qué orden de creación impone docker_image.nginx.image_id?
 
 Crea docker_image.nginx, es decir, descarga la imagen y obtiene su ID.
 Crea docker_container.web usando ese ID.
+
+Terraform arma un grafo de dependencias a partir de las referencias y aplica en ese orden; al destruir, lo invierte.
 
 3. ¿Qué descargó terraform init, dónde lo guardó y para qué sirve .terraform.lock.hcl?
 
@@ -76,12 +84,14 @@ terraform.tfstate: el estado real, con los IDs de lo que se creó (como el 4387c
 Si suben main.tf y el lock file a Git, también queda quién cambió qué y cuándo, que era justo uno de los puntos de «Por qué duele». El propio plan sirve de documentación del cambio: muestra url = "http://localhost:8080" -> "http://localhost:8081" antes de aplicarlo.
 
 
-PUNTO 3 
+`FASE 3`
 
 1. ¿Qué respondió Terraform en el paso 1 y en qué se diferencia del segundo docker run de la
 Fase 1?
 
 Esta vez el terraform hizo la comparación y antes de actuar valido y refresco la imagen y del contenedor, comparo la infraestructura real y como no encontro cambios no hizo nada. 
+
+A diferencia del segundo docker run, que falló con port is already allocated, terraform apply es idempotente: repetirlo no hace nada si el estado real coincide con el código.
 
 2. ¿Qué datos guarda el state que no escribieron en main.tf? ¿Para qué los necesita Terraform?
 
@@ -107,14 +117,11 @@ No subió solo una vez porque Terraform no guarda el state únicamente al final 
 
 5. Piensen en un proyecto real con bases de datos: ¿qué riesgo habría si este archivo se subiera a Git?
 
-Si el state se sube a Git, cualquiera con acceso al repositorio, o cualquiera si el repo es público, obtiene esas credenciales. Además, quedan en el historial aunque luego se borre el archivo, así que habría que rotar las contraseñas.
+El state guarda todos los atributos en texto plano, incluidas contraseñas de bases de datos y cadenas de conexión. Si el state se sube a Git, cualquiera con acceso al repositorio, o cualquiera si el repo es público, obtiene esas credenciales. Además, quedan en el historial aunque luego se borre el archivo, así que habría que rotar las contraseñas.
 
 Hay un segundo riesgo, operativo. Si cada integrante trabaja con su propia copia del state desde Git, las copias se desactualizan. Un apply con un state viejo puede hacer creer a Terraform que un recurso no existe y recrearlo, o que sobra y destruirlo. Con una base de datos, eso puede significar perder datos.
 
-PUNTO 4
-
-SALIDA del plan 
-
+`FASE 4`
 
 
 
@@ -145,7 +152,7 @@ Con `-replace`, Terraform destruye el contenedor y crea uno nuevo exactamente de
 
 Para el nivel que Terraform no ve, como el experimento C, se combina con herramientas de gestión de configuración que verifican periódicamente el contenido de los servidores, o se adopta del todo el modelo inmutable: los contenedores se reemplazan con frecuencia y nadie tiene acceso para modificarlos por dentro.
 
-FASE 5 
+`FASE 5`
 
 Por que se reemplza el contenedor, esto es por que el contenedor tiene dos bloques nuevos y ninguno de ellos se puede agregar si el contenedor ya existe.
 
@@ -187,7 +194,7 @@ Cuando se  ejecute `terraform destroy`, solo se eliminarán los recursos gestion
 - **Reutilización:** como se calcula a partir de `var.grupo`, el mismo código sirve para cualquier grupo cambiando solo `terraform.tfvars`. Con `"web-gN"` escrito a mano, cada grupo tendría que editar el código en varios lugares.
 - **Legibilidad:** `local.nombre` comunica la intención ("el nombre del servidor") en lugar de un valor literal cuyo origen hay que adivinar.
 
-`PUNTO 6`
+`FASE 6`
 
 El revisor debe explicar qué se destruye, qué se crea y por qué antes de aprobar.
 
@@ -251,9 +258,6 @@ En equipos más grandes, el módulo se publica en un **registro** (el Terraform 
 
 **1. ¿Qué respondió la terminal 2 en la prueba de bloqueo? ¿Qué problema de trabajo en equipo evita?**
 
-```text
-<pegar aquí la salida de terraform plan en la terminal 2>
-```
 
 La terminal 2 respondió `Error acquiring the state lock`, con la información del bloqueo: quién lo tiene, desde cuándo y qué operación lo tomó (`OperationTypeApply`). Mientras la terminal 1 tenía un `apply` abierto esperando confirmación, el backend PostgreSQL mantenía el state bloqueado, y ninguna otra operación podía leerlo ni escribirlo. Al responder `no` en la terminal 1, el bloqueo se liberó y la terminal 2 pudo planear normalmente.
 
@@ -302,7 +306,7 @@ Cada ambiente tiene un propósito distinto:
 
 Las carpetas separadas tienen su propio costo: más duplicación y riesgo de que los ambientes se desalineen con el tiempo. En la práctica, los riesgos de los workspaces se reducen con un pipeline CI/CD que fija el ambiente en cada ejecución, con revisión obligatoria del plan antes de aplicar en `prod` y, en equipos grandes, con un backend o credenciales separadas para producción.
 
-`PUNTO 8 `
+`FASE 8 `
 
 En el primer chequeo de seguridad fallaron 
 
@@ -333,10 +337,12 @@ Vale la pena porque permite probar el comportamiento real, creando infraestructu
 
 **3. ¿Qué controles fallaron en el bucket y cuántos quedaron después de corregir? ¿Cuáles de ellos corresponden al ejemplo «sin buckets públicos» de la clase?**
 
-| Escaneo | Passed | Failed |
-|---|---|---|
-| Antes (cuatro valores en `false`) | `<n>` | `<n>` |
-| Después (cuatro valores en `true`) | `<n>` | `<n>` |
+| Escaneo | Fallidos |
+|---|---|
+| Antes (cuatro valores en `false`) | 11 |
+| Después (cuatro valores en `true`) | 6 |
+
+Fallaron en el primer escaneo: CKV_AWS_53, CKV_AWS_54, CKV_AWS_55, CKV_AWS_56, CKV2_AWS_6, CKV_AWS_18, CKV_AWS_21, CKV_AWS_144, CKV_AWS_145, CKV2_AWS_61 y CKV2_AWS_62.
 
 Controles que fallaron en el primer escaneo: `<lista de IDs, por ejemplo CKV_AWS_53, CKV_AWS_54, CKV_AWS_55, CKV_AWS_56, CKV_AWS_18, CKV_AWS_21, CKV_AWS_145...>`
 
@@ -346,6 +352,7 @@ Al corregir los cuatro valores dejaron de fallar los cuatro controles de acceso 
 - **CKV_AWS_54:** bloquear políticas públicas (`block_public_policy`).
 - **CKV_AWS_55:** ignorar ACLs públicas existentes (`ignore_public_acls`).
 - **CKV_AWS_56:** restringir buckets públicos (`restrict_public_buckets`).
+- **CKV2_AWS_6:** que verifica que el bucket tenga un bloqueo de acceso público bien configurado.
 
 Los fallos restantes no tienen que ver con el acceso público, sino con otras buenas prácticas: versionado, registro de accesos, cifrado con KMS, entre otros. Por eso `validar.sh` aplica solo los controles 53 a 56 con `--check`: es la política que el equipo decidió hacer obligatoria. Exigir todos los controles haría fallar el pipeline siempre, aunque el bucket ya no sea público. En una nube real, esos controles restantes también habría que atenderlos.
 
@@ -365,3 +372,38 @@ El pipeline de la diapositiva tiene cuatro pasos: **Commit → Validar → Revis
 El paso humano que viene después es **«Revisar»**. Una persona lee el `terraform plan` (qué se crea, qué cambia y qué se destruye) y decide si aprueba el cambio, normalmente en un *pull request*. Solo con esa aprobación se pasa a **«Aplicar»**, donde se ejecuta el `apply`. Es el mismo rol que cumplió el revisor del plan en este taller.
 
 La división tiene sentido. La validación automática filtra los errores que una máquina puede detectar: formato, comportamiento y políticas de seguridad. Así el revisor no pierde tiempo en ellos y se concentra en lo que requiere criterio humano: si el cambio tiene sentido y si su impacto, por ejemplo un `-/+` en producción, es aceptable.
+
+`FASE 9`
+1. ¿Qué anti-patrón encontraron en el otro grupo? ¿Y cuál les señalaron a ustedes?
+
+En el Grupo 3 no encontramos ningún anti-patrón grave: cumplen los seis. La única falla está en «Aplicar sin leer el plan». Casi todos sus apply tienen la línea Plan: y la aprobación del revisor, pero el terraform apply -replace=docker_container.web del Experimento C de la Fase 4 (BITACORA.md:366-370) no tiene esa aprobación escrita. El hallazgo más importante no corresponde a ninguno de los seis anti-patrones: los 10 commits de su repositorio los hizo una sola persona, en 15 minutos. Por eso el historial de Git no muestra la rotación de roles ni sirve para saber quién cambió qué. Eso va contra el beneficio «Auditable» de la clase.
+
+A nosotros nos señalaron dos:
+
+«Secretos en el código» (parcial): el backend estaba vacío y la cadena de conexión no aparecía en el código, pero el texto literal de la contraseña quedó en BITACORA.md.
+«Aplicar sin leer el plan»: solo la Fase 6 tenía escrita la aprobación del revisor con su línea Plan:. En las demás fases las salidas quedaron solo como capturas de pantalla.
+
+Ya corregimos lo de la contraseña
+
+**2. ¿Qué habría pasado si eliminaban el contenedor del backend antes de ejecutar los `destroy`?**
+
+El state de los cuatro workspaces vivía dentro de `tf-state-g1`. Si ese contenedor se elimina primero:
+
+- **Terraform no podría ejecutar `destroy`:** cualquier comando (`plan`, `destroy`, `workspace select`) intentaría conectarse al backend en el puerto 5433 y fallaría. Sin el state, Terraform no puede saber qué recursos creó.
+- **Los siete sitios quedarían huérfanos:** los contenedores de `dev`, `staging` y `prod` seguirían corriendo, pero ya ningún state los registraría. Aunque se levantara un backend nuevo, estaría vacío, y Terraform creería que no existe nada que destruir.
+- **La limpieza volvería a ser manual:** habría que borrar cada contenedor con `docker rm -f`, identificándolos uno por uno, o reconstruir el state con `terraform import`. Es decir, volver al ClickOps de la Fase 1, justo lo que el taller busca evitar.
+
+Matiz técnico: la imagen de Postgres guarda los datos en un volumen anónimo, que `docker rm -f` sin la opción `-v` no elimina. En teoría, el state podría recuperarse montando ese volumen huérfano en un contenedor nuevo, pero sería un proceso de rescate frágil, no una operación normal. En la nube el riesgo es mayor: perder el state de producción significa perder el control de recursos que siguen generando costos.
+
+Por eso la guía exige el orden: primero `destroy` en cada ambiente, luego comprobar con `docker ps` que solo queda `tf-state-g1`, y **solo entonces** eliminar el backend. El lugar donde vive el state es lo último que se destruye, igual que fue lo primero que se creó.
+
+**3. ¿Por qué `destroy` exige la misma disciplina de lectura que `apply`?**
+
+Porque `destroy` también es un cambio sobre la infraestructura, y es el más difícil de revertir:
+
+- **No tiene vuelta atrás:** un `apply` equivocado normalmente se corrige con otro `apply`. Un `destroy` equivocado elimina recursos y, con ellos, sus datos. En un proyecto real con bases de datos, lo destruido no se recupera recreando el recurso: el recurso vuelve, pero vacío.
+- **El workspace activo decide qué se destruye:** el mismo comando `terraform destroy` borra `dev` o `prod` según el workspace seleccionado, y eso no se ve en el código. Leer el plan es la última oportunidad de notar que se está en el ambiente equivocado. Por eso, en este taller, el revisor confirmó el workspace y el número de recursos antes de cada aprobación: 2 en `dev` (una imagen y un contenedor) y 6 en `staging` y en `prod`.
+- **Puede afectar más de lo esperado:** el state puede incluir recursos que no se tenían presentes, y la destrucción sigue el grafo de dependencias. El plan muestra exactamente la lista y la línea `Plan: 0 to add, 0 to change, X to destroy`, y el revisor debe confirmar que ese número coincide con lo esperado antes de escribir `yes`.
+
+Terraform muestra el plan de destrucción y pide confirmación por la misma razón que lo hace con `apply`: describe el impacto antes de que ocurra. Aprobarlo sin leer es tan riesgoso como aplicar sin leer, con la diferencia de que el error no se arregla con otro comando.
+
